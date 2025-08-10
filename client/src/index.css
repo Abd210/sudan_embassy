@@ -1,0 +1,5 @@
+/* Tailwind is provided via CDN in index.html for an exact visual match */
+html, body { height: 100%; }
+::-webkit-scrollbar { display: none; }
+html, body { -ms-overflow-style: none; scrollbar-width: none; }
+
