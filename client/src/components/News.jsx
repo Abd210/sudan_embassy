@@ -1,6 +1,10 @@
 import { useEffect, useState } from 'react'
+import { useTranslation } from 'react-i18next'
 
-function NewsCard({ tagColor, tagLabel, date, title, summary, image, alt }) {
+import { Link } from 'react-router-dom'
+
+function NewsCard({ id, tagColor, tagLabel, date, title, summary, image, alt }) {
+  const { t } = useTranslation()
   return (
     <div className="bg-white rounded-lg shadow-sm overflow-hidden">
       <div className="h-48 bg-gray-200 relative">
@@ -11,22 +15,24 @@ function NewsCard({ tagColor, tagLabel, date, title, summary, image, alt }) {
         <span className="text-xs text-gray-500">{date}</span>
         <h3 className="text-lg font-medium my-2">{title}</h3>
         <p className="text-gray-600 mb-3">{summary}</p>
-        <span className="text-sudan-blue hover:underline flex items-center cursor-pointer">
-          Read more
-          <i className="fa-solid fa-arrow-right ml-2" />
-        </span>
+        <Link to={`/news/${id}`} className="text-sudan-blue hover:underline flex items-center cursor-pointer">
+          {t('news.read_more')} <i className="fa-solid fa-arrow-right ml-2" />
+        </Link>
       </div>
     </div>
   )
 }
 
-export default function News() {
+export default function News({ limit }) {
+  const { t, i18n } = useTranslation()
   const [posts, setPosts] = useState([])
   useEffect(()=>{
-    fetch('http://localhost:3000/api/news').then(r=>r.json()).then((list)=>{
+    const lang = i18n.resolvedLanguage
+    fetch(`http://localhost:3000/api/news?lang=${encodeURIComponent(lang||'')}`).then(r=>r.json()).then((list)=>{
       setPosts(list.map(n => ({
-        tagColor: n.tag === 'Official' ? 'bg-sudan-green' : 'bg-sudan-blue',
-        tagLabel: n.tag || 'Update',
+        id: n.id,
+        tagColor: (n.tag||'').toLowerCase()==='official' ? 'bg-sudan-green' : 'bg-sudan-blue',
+        tagLabel: n.tag || t('news.tag_update', 'Update'),
         date: new Date(n.createdAt).toLocaleDateString(),
         title: n.title,
         summary: n.summary,
@@ -34,19 +40,25 @@ export default function News() {
         alt: n.title
       })))
     })
-  }, [])
+  }, [i18n.resolvedLanguage])
 
+  const list = typeof limit === 'number' ? posts.slice(0, limit) : posts
   return (
-    <section id="news-section">
-      <div className="flex justify-between items-center mb-4">
-        <h2 className="text-2xl font-bold text-sudan-black">Latest News & Announcements</h2>
-        <span className="text-sudan-blue hover:underline cursor-pointer">View All</span>
+    <section id="news-section" data-aos="fade-up">
+      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between mb-4 gap-2">
+        <h2 className="text-2xl font-bold text-sudan-black sudan-section-title">{t('news.title')}</h2>
+        <a href="/news" className="text-sudan-blue hover:underline cursor-pointer">{t('common.view_all')}</a>
       </div>
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-8">
-        {posts.map((p) => (
-          <NewsCard key={p.title} {...p} />
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 md:gap-6 mb-8">
+        {list.map((p, idx) => (
+          <div key={p.id || p.title} className="card overflow-hidden" data-aos="fade-up" data-aos-delay={idx*90}>
+            <NewsCard {...p} />
+          </div>
         ))}
       </div>
+      {typeof limit === 'number' && posts.length > limit && (
+        <div className="flex justify-center"><a href="/news" className="text-sudan-blue hover:underline cursor-pointer">{t('common.view_all')}</a></div>
+      )}
     </section>
   )
 }

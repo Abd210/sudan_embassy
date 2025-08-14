@@ -5,10 +5,18 @@ let app
 if (!admin.apps.length) {
   try {
     const serviceAccountPath = process.env.GOOGLE_APPLICATION_CREDENTIALS || path.join(__dirname, '..', 'serviceAccountKey.json')
+    const svc = require(serviceAccountPath)
+    const projectId = svc.project_id
+    const bucketFromEnv = process.env.FIREBASE_BUCKET
+    const inferredNew = projectId ? `${projectId}.firebasestorage.app` : undefined
+    const inferredLegacy = projectId ? `${projectId}.appspot.com` : undefined
+    const chosenBucket = bucketFromEnv || inferredNew || inferredLegacy
     app = admin.initializeApp({
-      credential: admin.credential.cert(require(serviceAccountPath)),
-      storageBucket: process.env.FIREBASE_BUCKET || 'sudanembassy-f0c6d.appspot.com',
+      credential: admin.credential.cert(svc),
+      storageBucket: chosenBucket,
     })
+    // eslint-disable-next-line no-console
+    console.log('Firebase Admin initialized for project:', projectId, 'bucket:', chosenBucket)
   } catch (err) {
     console.error('Failed to initialize Firebase Admin. Ensure serviceAccountKey.json exists at project root.', err)
     throw err

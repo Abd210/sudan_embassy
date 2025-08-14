@@ -1,3 +1,6 @@
+import { useEffect, useState } from 'react'
+import { useTranslation } from 'react-i18next'
+
 function StatusCard({ color, icon, title, subtitle }) {
   return (
     <div className="bg-white rounded-lg shadow-sm p-4 flex items-center">
@@ -13,11 +16,29 @@ function StatusCard({ color, icon, title, subtitle }) {
 }
 
 export default function StatusBar() {
+  const { t } = useTranslation()
+  const [cards, setCards] = useState([
+    { color: 'bg-sudan-green', icon: 'fa-solid fa-clock', subtitle: '' },
+    { color: 'bg-sudan-blue', icon: 'fa-solid fa-bell', subtitle: '—' },
+    { color: 'bg-sudan-black', icon: 'fa-solid fa-calendar-alt', subtitle: '—' },
+  ])
+  useEffect(()=>{
+    fetch('http://localhost:3000/api/settings').then(r=>r.json()).then(s => {
+      if (!s) return
+      const updated = [...cards]
+      if (s.statusBar?.status) updated[0].subtitle = s.statusBar.status
+      if (s.statusBar?.holiday) updated[1].subtitle = s.statusBar.holiday
+      if (s.statusBar?.nextAppointment) updated[2].subtitle = s.statusBar.nextAppointment
+      setCards(updated)
+    }).catch(()=>{})
+  },[])
   return (
-    <div id="status-bar" className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
-      <StatusCard color="bg-sudan-green" icon="fa-solid fa-clock" title="Embassy Status" subtitle="Open today: 9:00 AM - 4:00 PM" />
-      <StatusCard color="bg-sudan-blue" icon="fa-solid fa-bell" title="Holiday Notice" subtitle="Closed on August 15 (Romanian Holiday)" />
-      <StatusCard color="bg-sudan-black" icon="fa-solid fa-calendar-alt" title="Next Available Appointment" subtitle="August 18, 2023" />
+    <div id="status-bar" data-aos="fade-up" className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 md:gap-4 mb-6">
+      {cards.map((c,i)=>(
+        <div key={i} data-aos="zoom-in" data-aos-delay={i*70}>
+          <StatusCard {...c} title={i===0?t('status.embassy_status'):i===1?t('status.holiday_notice'):t('status.next_available')} />
+        </div>
+      ))}
     </div>
   )
 }

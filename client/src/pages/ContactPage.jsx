@@ -1,29 +1,35 @@
+import { useEffect, useState } from 'react'
+import { useTranslation } from 'react-i18next'
+
 export default function ContactPage() {
+  const { t } = useTranslation()
+  const [contact, setContact] = useState({ address: '123 Diplomatic Street, Sector 1, Bucharest, Romania', phone: '+40 21 123 4567', email: 'info@sudanembassy.ro' })
+  useEffect(()=>{
+    fetch('http://localhost:3000/api/settings').then(r=>r.json()).then(s=>{
+      const address = s?.address || contact.address
+      const phone = s?.header?.phone || contact.phone
+      const email = s?.header?.email || contact.email
+      setContact({ address, phone, email })
+    }).catch(()=>{})
+  },[])
   return (
     <main className="container mx-auto px-4 py-10">
-      <h1 className="text-3xl font-bold text-sudan-black mb-6">Contact Us</h1>
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-        <div className="bg-white rounded-lg shadow-sm p-6 space-y-3">
-          <div className="flex items-start"><i className="fa-solid fa-location-dot w-6 text-sudan-green mt-1" /><span className="ml-2">123 Diplomatic Street, Sector 1, Bucharest, Romania</span></div>
-          <div className="flex items-center"><i className="fa-solid fa-phone w-6 text-sudan-green" /><span className="ml-2">+40 21 123 4567</span></div>
-          <div className="flex items-center"><i className="fa-solid fa-envelope w-6 text-sudan-green" /><span className="ml-2">info@sudanembassy.ro</span></div>
-        </div>
-        <div className="bg-white rounded-lg shadow-sm p-6">
-          <form className="space-y-4">
-            <div>
-              <label className="block text-sm font-medium mb-1">Name</label>
-              <input className="w-full border rounded px-3 py-2" placeholder="Your name" />
-            </div>
-            <div>
-              <label className="block text-sm font-medium mb-1">Email</label>
-              <input type="email" className="w-full border rounded px-3 py-2" placeholder="name@example.com" />
-            </div>
-            <div>
-              <label className="block text-sm font-medium mb-1">Message</label>
-              <textarea className="w-full border rounded px-3 py-2" rows="5" placeholder="How can we help?" />
-            </div>
-            <button className="bg-sudan-green text-white px-6 py-2 rounded hover:bg-green-700">Send</button>
-          </form>
+      <h1 className="text-3xl font-bold text-sudan-black mb-3 text-center">{t('contact.title')}</h1>
+      <p className="text-center text-gray-600 mb-8">{t('hero.paragraph')}</p>
+      <div className="max-w-3xl mx-auto">
+        <div className="card p-6 md:p-8 space-y-4">
+          <div className="flex items-start">
+            <i className="fa-solid fa-location-dot w-6 text-sudan-green mt-1" />
+            <span className="ml-3 leading-relaxed">{contact.address}</span>
+          </div>
+          <div className="flex items-center">
+            <i className="fa-solid fa-phone w-6 text-sudan-green" />
+            <a className="ml-3 text-sudan-blue hover:underline" href={`tel:${contact.phone}`}>{contact.phone}</a>
+          </div>
+          <div className="flex items-center">
+            <i className="fa-solid fa-envelope w-6 text-sudan-green" />
+            <a className="ml-3 text-sudan-blue hover:underline" href={`mailto:${contact.email}`}>{contact.email}</a>
+          </div>
         </div>
       </div>
     </main>

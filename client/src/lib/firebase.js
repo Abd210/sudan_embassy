@@ -1,7 +1,7 @@
 // Firebase client initialization
 import { initializeApp } from 'firebase/app'
 import { getAnalytics, isSupported } from 'firebase/analytics'
-import { getAuth } from 'firebase/auth'
+import { getAuth, onAuthStateChanged } from 'firebase/auth'
 
 // Your web app's Firebase configuration
 const firebaseConfig = {
@@ -28,6 +28,18 @@ if (typeof window !== 'undefined') {
       }
     })
     .catch(() => {})
+
+  // Keep an up-to-date ID token for authenticated admin actions
+  onAuthStateChanged(auth, async (user) => {
+    try {
+      if (user) {
+        const token = await user.getIdToken()
+        localStorage.setItem('fbToken', token)
+      } else {
+        localStorage.removeItem('fbToken')
+      }
+    } catch {}
+  })
 }
 
 export default firebaseApp

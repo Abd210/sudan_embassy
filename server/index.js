@@ -1,11 +1,24 @@
 const express = require('express');
+const fs = require('fs');
+const path = require('path');
 const session = require('express-session');
 const cors = require('cors');
 const multer = require('multer');
 const { v4: uuidv4 } = require('uuid');
-const fs = require('fs');
-const path = require('path');
 const { db, bucket, verifyIdToken } = require('./firebaseAdmin');
+let mailer = null;
+let transporter = null;
+try {
+  mailer = require('nodemailer');
+  transporter = mailer.createTransport({
+    host: process.env.SMTP_HOST || 'smtp.gmail.com',
+    port: Number(process.env.SMTP_PORT || 587),
+    secure: Boolean(process.env.SMTP_SECURE || false),
+    auth: process.env.SMTP_USER ? { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS } : undefined,
+  });
+} catch (_) {
+  console.warn('nodemailer not installed; emails will be logged to console.');
+}
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -32,39 +45,99 @@ app.use(
   })
 );
 
-// Upload directory (local dev: server/uploads; Cloud Run: /tmp/uploads)
-const isCloudRun = !!process.env.K_SERVICE;
-const uploadDir = process.env.UPLOAD_DIR || (isCloudRun ? '/tmp/uploads' : path.join(__dirname, 'uploads'));
-fs.mkdirSync(uploadDir, { recursive: true });
-
-// Serve uploaded files
-app.use('/media', express.static(uploadDir));
-
-// Multer disk storage
-const storage = multer.diskStorage({
-  destination: (req, file, cb) => cb(null, uploadDir),
-  filename: (req, file, cb) => {
-    const safe = (file.originalname || 'file').replace(/[^a-zA-Z0-9._-]/g, '_');
-    cb(null, `${uuidv4()}-${safe}`);
-  },
-});
-const upload = multer({ storage });
+// Multer memory storage for file uploads
+const upload = multer({ storage: multer.memoryStorage() })
 
 app.get('/', (req, res) => {
   res.json({ message: 'API up' });
 });
 
-// Server-side upload to local disk (/media/*) to avoid client-side CORS
+// Server-side upload to Firebase Storage to avoid client-side CORS
 app.post('/api/upload', requireAnyAuth, upload.single('file'), async (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ error: 'file is required' });
-    const filename = path.basename(req.file.filename);
-    const mediaPath = `/media/${filename}`;
-    const url = `${req.protocol}://${req.get('host')}${mediaPath}`;
-    res.json({ ok: true, url, path: mediaPath });
+    const folder = req.query.folder || req.body?.folder || 'uploads';
+    const id = uuidv4();
+    const safe = (req.file.originalname || 'file').replace(/[^a-zA-Z0-9._-]/g, '_');
+    const objectPath = `${folder}/${id}-${safe}`;
+    if (!bucket?.name) return res.status(500).json({ error: 'Storage bucket not configured. Check FIREBASE_BUCKET or serviceAccount project_id.' })
+    const file = bucket.file(objectPath);
+    await file.save(req.file.buffer, { contentType: req.file.mimetype, public: true });
+    await file.makePublic();
+    const url = `https://storage.googleapis.com/${bucket.name}/${file.name}`;
+    res.json({ ok: true, url, path: objectPath });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
+});
+
+// Public submissions (no auth): accepts file + contact details and stores in Firestore
+app.post('/api/submissions', upload.single('file'), async (req, res) => {
+  try {
+    const { type = 'consular', relatedId = '', name = '', email = '', phone = '', notes = '' } = req.body || {};
+    if (!name || !email || !phone) return res.status(400).json({ error: 'name, email, phone are required' });
+    let uploaded = { url: null, path: null, fileName: null, fileType: null };
+    if (req.file) {
+      const safe = (req.file.originalname || 'file').replace(/[^a-zA-Z0-9._-]/g, '_');
+      const objectPath = `submissions/${uuidv4()}-${safe}`;
+      if (!bucket?.name) return res.status(500).json({ error: 'Storage bucket not configured. Check FIREBASE_BUCKET or serviceAccount project_id.' })
+      const f = bucket.file(objectPath);
+      await f.save(req.file.buffer, { contentType: req.file.mimetype, public: true });
+      await f.makePublic();
+      uploaded = { url: `https://storage.googleapis.com/${bucket.name}/${f.name}`, path: objectPath, fileName: safe, fileType: req.file.mimetype };
+    }
+    const id = uuidv4();
+    const doc = {
+      id,
+      type,
+      relatedId,
+      name,
+      email,
+      phone,
+      notes,
+      fileUrl: uploaded.url,
+      fileName: uploaded.fileName,
+      fileType: uploaded.fileType,
+      createdAt: Date.now(),
+      status: 'new',
+    };
+    await db.collection('submissions').doc(id).set(doc);
+
+    // Send email notification if transporter available
+    try {
+      const settings = await readSettings();
+      const toEmail = settings?.receiveEmail || settings?.contactEmail || settings?.header?.email || process.env.ADMIN_EMAIL || 'info@sudanembassy.ro';
+      const subject = `New ${type} submission`;
+      const text = `A new ${type} submission has been received.\n\nName: ${name}\nEmail: ${email}\nPhone: ${phone}\nRelated ID: ${relatedId}\nNotes: ${notes}\nFile: ${uploaded.url || '—'}\n\nAdmin: http://localhost:5173/admin`;
+      if (transporter && toEmail) {
+        await transporter.sendMail({ from: process.env.SMTP_FROM || 'no-reply@sudanembassy.local', to: toEmail, subject, text });
+      } else {
+        console.log('[EMAIL MOCK]', { to: toEmail, subject, text });
+      }
+    } catch (e) {
+      console.warn('Email send failed or not configured:', e.message);
+    }
+
+    res.json({ ok: true, data: doc });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Admin: list submissions
+app.get('/api/submissions', requireAnyAuth, async (req, res) => {
+  const { type } = req.query || {};
+  let ref = db.collection('submissions');
+  if (type) ref = ref.where('type', '==', String(type));
+  const snap = await ref.orderBy('createdAt', 'desc').get();
+  res.json(snap.docs.map(d=>d.data()));
+});
+
+// Admin: update submission status
+app.patch('/api/submissions/:id', requireAnyAuth, async (req, res) => {
+  const id = req.params.id;
+  await db.collection('submissions').doc(id).set({ ...req.body, id }, { merge: true });
+  res.json({ ok: true });
 });
 
 // Firebase-authenticated middleware (Bearer token from client). Not used yet on frontend
@@ -126,14 +199,18 @@ app.post('/api/admin/credentials', requireAuth, (req, res) => {
 app.post('/api/consular-services', requireAnyAuth, async (req, res) => {
   try {
     const id = uuidv4();
-    const { name = '', icon = '', details = '', image = null } = req.body || {}
+    const { name = '', icon = '', details = '', image = null, attachmentUrl = null, attachmentType = null, fileName = null, i18n: i18nBody = {} } = req.body || {}
     const data = {
       id,
       name,
       icon,
       details,
       image,
+      attachmentUrl: attachmentUrl || image,
+      attachmentType: attachmentType || (image ? 'image' : null),
+      fileName: fileName || null,
       createdAt: Date.now(),
+      i18n: i18nBody || {},
     };
     await db.collection('consularServices').doc(id).set(data);
     res.json({ ok: true, data });
@@ -142,9 +219,25 @@ app.post('/api/consular-services', requireAnyAuth, async (req, res) => {
   }
 });
 
+function resolveI18n(doc, lang, fields){
+  if (!lang || !doc || !doc.i18n || !doc.i18n[lang]) return doc
+  const out = { ...doc }
+  const tr = doc.i18n[lang]
+  fields.forEach(f=>{ if (tr[f]) out[f] = tr[f] })
+  return out
+}
+
 app.get('/api/consular-services', async (req, res) => {
+  const lang = (req.query.lang||'').trim()
   const snap = await db.collection('consularServices').orderBy('createdAt', 'desc').get();
-  res.json(snap.docs.map(d=>d.data()));
+  res.json(snap.docs.map(d=> resolveI18n(d.data(), lang, ['name','details'])));
+});
+
+app.get('/api/consular-services/:id', async (req, res) => {
+  const lang = (req.query.lang||'').trim()
+  const doc = await db.collection('consularServices').doc(req.params.id).get();
+  if (!doc.exists) return res.status(404).json({ error: 'Not found' });
+  res.json(resolveI18n(doc.data(), lang, ['name','details']));
 });
 
 app.put('/api/consular-services/:id', requireAnyAuth, async (req, res) => {
@@ -177,12 +270,18 @@ app.patch('/api/appointments/:id', requireAnyAuth, async (req, res) => {
   res.json({ ok: true });
 });
 
+app.delete('/api/appointments/:id', requireAnyAuth, async (req, res) => {
+  const id = req.params.id;
+  await db.collection('appointments').doc(id).delete();
+  res.json({ ok: true });
+});
+
 // News
 app.post('/api/news', requireAnyAuth, async (req, res) => {
   try {
     const id = uuidv4();
-    const { title = '', summary = '', tag = '', image = null } = req.body || {}
-    const data = { id, title, summary, tag, image, createdAt: Date.now() };
+    const { title = '', summary = '', tag = '', image = null, attachmentUrl = null, attachmentType = null, fileName = null, i18n: i18nBody = {} } = req.body || {}
+    const data = { id, title, summary, tag, image, attachmentUrl: attachmentUrl || image, attachmentType: attachmentType || (image ? 'image' : null), fileName: fileName || null, createdAt: Date.now(), i18n: i18nBody || {} };
     await db.collection('news').doc(id).set(data);
     res.json({ ok: true, data });
   } catch (e) {
@@ -191,8 +290,16 @@ app.post('/api/news', requireAnyAuth, async (req, res) => {
 });
 
 app.get('/api/news', async (req, res) => {
+  const lang = (req.query.lang||'').trim()
   const snap = await db.collection('news').orderBy('createdAt','desc').get();
-  res.json(snap.docs.map(d=>d.data()));
+  res.json(snap.docs.map(d=> resolveI18n(d.data(), lang, ['title','summary','tag'])));
+});
+
+app.get('/api/news/:id', async (req, res) => {
+  const lang = (req.query.lang||'').trim()
+  const doc = await db.collection('news').doc(req.params.id).get();
+  if (!doc.exists) return res.status(404).json({ error: 'Not found' });
+  res.json(resolveI18n(doc.data(), lang, ['title','summary','tag']));
 });
 
 app.put('/api/news/:id', requireAnyAuth, async (req, res) => {
@@ -229,27 +336,93 @@ app.put('/api/news/order', requireAnyAuth, async (req, res) => {
 
 // Site settings
 const SETTINGS_DOC = 'site'
+const SETTINGS_FILE = path.join(__dirname, 'settings.json')
+
+async function readSettings() {
+  try {
+    const doc = await db.collection('settings').doc(SETTINGS_DOC).get()
+    if (doc.exists) return doc.data()
+  } catch (e) {
+    console.warn('Firestore settings read failed, using file fallback:', e.message)
+  }
+  try {
+    if (fs.existsSync(SETTINGS_FILE)) {
+      return JSON.parse(fs.readFileSync(SETTINGS_FILE, 'utf8'))
+    }
+  } catch (e) {
+    console.warn('File settings read failed:', e.message)
+  }
+  return {}
+}
+
+async function writeSettings(data) {
+  try {
+    await db.collection('settings').doc(SETTINGS_DOC).set(data || {}, { merge: true })
+    return { ok: true, source: 'firestore' }
+  } catch (e) {
+    console.warn('Firestore settings write failed, writing to file:', e.message)
+    try {
+      fs.writeFileSync(SETTINGS_FILE, JSON.stringify(data || {}, null, 2), 'utf8')
+      return { ok: true, source: 'file' }
+    } catch (err) {
+      return { ok: false, error: err.message }
+    }
+  }
+}
+
 app.get('/api/settings', async (req, res) => {
-  const doc = await db.collection('settings').doc(SETTINGS_DOC).get();
-  res.json(doc.exists ? doc.data() : {});
+  const settings = await readSettings()
+  res.json(settings)
 });
 
 app.put('/api/settings', requireAnyAuth, async (req, res) => {
-  await db.collection('settings').doc(SETTINGS_DOC).set(req.body || {}, { merge: true });
-  res.json({ ok: true });
+  const result = await writeSettings(req.body)
+  if (!result.ok) return res.status(500).json({ error: result.error })
+  res.json(result)
 });
+
+// Contact email endpoint (public)
+app.post('/api/contact', async (req, res) => {
+  try {
+    const { name = '', email = '', message = '' } = req.body || {}
+    if (!name || !email || !message) return res.status(400).json({ error: 'name, email, message are required' })
+    const settings = await readSettings()
+    const toEmail = settings?.receiveEmail || settings?.contactEmail || settings?.header?.email || process.env.ADMIN_EMAIL
+    const subject = `Contact form from ${name}`
+    const text = `New contact message:\n\nName: ${name}\nEmail: ${email}\n\nMessage:\n${message}`
+    try {
+      if (transporter && toEmail) {
+        await transporter.sendMail({ from: process.env.SMTP_FROM || 'no-reply@sudanembassy.local', to: toEmail, subject, text })
+      } else {
+        console.log('[CONTACT EMAIL MOCK]', { to: toEmail, subject, text })
+      }
+    } catch (e) {
+      console.warn('Contact email send failed:', e.message)
+    }
+    // Optional: store as submission
+    try {
+      const id = uuidv4()
+      await db.collection('submissions').doc(id).set({ id, type: 'contact', name, email, phone: '', notes: message, createdAt: Date.now(), status: 'new' })
+    } catch {}
+    res.json({ ok: true })
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
+})
 
 // Alerts
 app.post('/api/alerts', requireAnyAuth, async (req, res) => {
   const id = uuidv4();
-  const data = { id, message: req.body.message || '', level: req.body.level || 'info', createdAt: Date.now(), active: true };
+  const { message = '', level = 'info', attachmentUrl = null, attachmentType = null, fileName = null, active = true, i18n: i18nBody = {} } = req.body || {}
+  const data = { id, message, level, attachmentUrl, attachmentType, fileName, createdAt: Date.now(), active, i18n: i18nBody || {} };
   await db.collection('alerts').doc(id).set(data);
   res.json({ ok: true, data });
 });
 
 app.get('/api/alerts', async (req, res) => {
+  const lang = (req.query.lang||'').trim()
   const snap = await db.collection('alerts').orderBy('createdAt','desc').get();
-  res.json(snap.docs.map(d=>d.data()));
+  res.json(snap.docs.map(d=> resolveI18n(d.data(), lang, ['message','level'])));
 });
 
 app.patch('/api/alerts/:id', requireAnyAuth, async (req, res) => {
@@ -262,6 +435,34 @@ app.delete('/api/alerts/:id', requireAnyAuth, async (req, res) => {
   await db.collection('alerts').doc(req.params.id).delete();
   res.json({ ok: true });
 });
+
+// Forms & Downloads
+app.post('/api/forms', requireAnyAuth, async (req, res) => {
+  const id = uuidv4();
+  const { title = '', description = '', fileUrl = null, fileType = null, fileName = null, i18n: i18nBody = {} } = req.body || {}
+  if (!fileUrl) return res.status(400).json({ error: 'fileUrl is required' })
+  const data = { id, title, description, fileUrl, fileType, fileName, createdAt: Date.now(), i18n: i18nBody || {} }
+  await db.collection('forms').doc(id).set(data)
+  res.json({ ok: true, data })
+})
+
+app.get('/api/forms', async (req, res) => {
+  const lang = (req.query.lang||'').trim()
+  const snap = await db.collection('forms').orderBy('createdAt','desc').get()
+  res.json(snap.docs.map(d=> resolveI18n(d.data(), lang, ['title','description'])))
+})
+
+app.get('/api/forms/:id', async (req, res) => {
+  const lang = (req.query.lang||'').trim()
+  const doc = await db.collection('forms').doc(req.params.id).get()
+  if (!doc.exists) return res.status(404).json({ error: 'Not found' })
+  res.json(resolveI18n(doc.data(), lang, ['title','description']))
+})
+
+app.delete('/api/forms/:id', requireAnyAuth, async (req, res) => {
+  await db.collection('forms').doc(req.params.id).delete()
+  res.json({ ok: true })
+})
 
 app.listen(PORT, () => {
   console.log('Server running on http://localhost:' + PORT);
