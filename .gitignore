@@ -36,6 +36,7 @@ firebase-debug.log
 serviceAccount*.json
 *serviceAccount*.json
 firebase-admin*.json
+**/firebase-sa-key.json
 *.serviceAccountKey.json
 *.private-key.json
 
@@ -50,3 +51,4 @@ Thumbs.db
 coverage/
 *.local
 node_modules
+uploads

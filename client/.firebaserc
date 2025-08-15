@@ -1,6 +1,6 @@
 {
   "projects": {
-    "embassy": "sudanembassy-f0c6d"
+    "default": "sudan-embassy"
   },
   "targets": {},
   "etags": {}
